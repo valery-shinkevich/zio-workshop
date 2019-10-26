@@ -8,8 +8,8 @@ import zio.blocking.Blocking
 import zio.console._
 import zio.duration.Duration
 import zio.random.Random
-
 import java.io.IOException
+
 import net.degoes.zio.applications.hangman.GuessResult.Incorrect
 import net.degoes.zio.applications.hangman.GuessResult.Won
 import net.degoes.zio.applications.hangman.GuessResult.Correct
@@ -17,13 +17,16 @@ import net.degoes.zio.applications.hangman.GuessResult.Unchanged
 import net.degoes.zio.applications.hangman.GuessResult.Lost
 import java.util.concurrent.ConcurrentHashMap
 
+import scala.annotation.tailrec
+
 object sharding extends App {
+
   /**
-   * Create N workers reading from a Queue, if one of them fails, 
-   * then wait for the other ones to process the current item, but 
+   * Create N workers reading from a Queue, if one of them fails,
+   * then wait for the other ones to process the current item, but
    * terminate all the workers.
    */
-  def shard[R, E, A](queue: Queue[A], n: Int, worker: A => ZIO[R, E, Unit]): ZIO[R, E, Unit] = 
+  def shard[R, E, A](queue: Queue[A], n: Int, worker: A => ZIO[R, E, Unit]): ZIO[R, E, Unit] =
     ???
 
   def run(args: List[String]) = ???
@@ -43,10 +46,10 @@ object alerting {
   def sendSystemEmail(to: Email, subject: String, body: String): UIO[Unit] = ???
 
   /**
-   * Use STM to alert an engineer when the number of hourly errors exceeds 
+   * Use STM to alert an engineer when the number of hourly errors exceeds
    * 100.
    */
-  def alertEngineer(metrics: Metrics, onDuty: TRef[Engineer]): UIO[Unit] = 
+  def alertEngineer(metrics: Metrics, onDuty: TRef[Engineer]): UIO[Unit] =
     ???
 }
 
@@ -1063,7 +1066,7 @@ object hangman extends App {
     myGame.fold(_ => 1, _ => 0)
 }
 
-object parallel_web_crawler {
+object parallel_web_crawler extends App {
   trait Web {
     def web: Web.Service
   }
@@ -1071,26 +1074,30 @@ object parallel_web_crawler {
     trait Service {
       def getURL(url: URL): IO[Exception, String]
     }
-    trait Live extends Web with Blocking {
-      val web = new Service {
-
-        /**
-         * EXERCISE 1
-         *
-         * Use the `effectBlocking` combinator to safely import the Scala `Source.fromURL`
-         * side-effect into a purely functional ZIO effect, using `refineOrDie` to narrow
-         * the `Throwable` error to `Exceptiono`.
-         */
-        def getURL(url: URL): IO[Exception, String] = {
-          // def effectBlocking[A](sideEffect: => A): ZIO[Blocking, Throwable, A]
-
-          def getURLImpl(url: URL): String =
-            scala.io.Source.fromURL(url.url)(scala.io.Codec.UTF8).mkString
-
-          ???
-        }
-      }
-    }
+//    trait Live extends Web {
+//      val web = new Service {
+//
+//        /**
+//         * EXERCISE 1
+//         *
+//         * Use the `effectBlocking` combinator to safely import the Scala `Source.fromURL`
+//         * side-effect into a purely functional ZIO effect, using `refineOrDie` to narrow
+//         * the `Throwable` error to `Exceptiono`.
+//         */
+//        def getURL(url: URL) = {
+//          // def effectBlocking[A](sideEffect: => A): ZIO[Blocking, Throwable, A]
+//
+//          def getURLImpl(url: URL): String =
+//            scala.io.Source.fromURL(url.url)(scala.io.Codec.UTF8).mkString
+//
+//          //import zio.blocking.effectBlocking
+//
+//          IO.effect(getURLImpl(url)).refineOrDie {
+//            case e: Exception => e
+//          }
+//        }
+//      }
+//    }
   }
 
   /**
@@ -1098,7 +1105,7 @@ object parallel_web_crawler {
    *
    * Using `ZIO.accessM`, delegate to the `Web` module's `getURL` function.
    */
-  def getURL(url: URL): ZIO[Web, Exception, String] = ???
+  def getURL(url: URL): ZIO[Web, Exception, String] = ZIO.accessM[Web](web => web.web.getURL(url))
 
   final case class CrawlState[+E](visited: Set[URL], errors: List[E]) {
     final def visitAll(urls: Set[URL]): CrawlState[E] = copy(visited = visited ++ urls)
@@ -1120,7 +1127,33 @@ object parallel_web_crawler {
     seeds: Set[URL],
     router: URL => Set[URL],
     processor: (URL, String) => IO[E, Unit]
-  ): ZIO[Web, Nothing, List[E]] = ???
+  ) = {
+
+    def loop(seeds: Set[URL], ref: Ref[CrawlState[E]]): ZIO[Web, Exception, Unit] =
+      ZIO
+        .foreachParN(10)(seeds) { seed =>
+          (for {
+            html    <- getURL(seed)
+            scraped = extractURLs(seed, html).toSet.flatMap(router)
+            either  <- processor(seed, html).either
+            newUrls <- ref.modify(
+                        state =>
+                          (scraped -- state.visited, {
+                            val s2 = state.visitAll(scraped);
+                            either.fold(s2.logError, _ => s2)
+                          })
+                      )
+          } yield newUrls) orElse ZIO.succeed(Set.empty[URL])
+        }
+        .map(x => x.toSet.flatten)
+        .flatMap(newUrls => if (newUrls.nonEmpty) loop(newUrls, ref) else ZIO.unit)
+
+    for {
+      ref   <- Ref.make(CrawlState(seeds, List.empty[E]))
+      _     <- loop(seeds, ref)
+      state <- ref.get
+    } yield state.errors
+  }
 
   /**
    * A data structure representing a structured URL, with a smart constructor.
@@ -1201,21 +1234,26 @@ object parallel_web_crawler {
          * `getURL` for the `TestWeb` module.
          */
         def getURL(url: URL): IO[Exception, String] =
-          ???
+          IO(SiteIndex(url)).refineOrDie {
+            case e: Exception => e
+          }
       }
     }
 
     val TestRouter: URL => Set[URL] =
-      url => if (url.parsed.apexDomain == Some("scalaz.org")) Set(url) else Set()
+      url => if (url.parsed.apexDomain == Some("scalaz.org")) Set(url) else Set.empty[URL]
 
-    val Processor: (URL, String) => IO[Unit, List[(URL, String)]] =
-      (url, html) => IO.succeed(List(url -> html))
+    val Processor: (URL, String) => UIO[Unit] =
+      (url, html) => UIO(println(s"$url -> $html")) // IO.succeed(List(url -> html)).ignore
   }
 
-  def run(args: List[String]): ZIO[Console, Nothing, Int] =
+  def run(args: List[String]) =
     (for {
-      _ <- putStrLn("Hello World!")
-    } yield ()).fold(_ => 1, _ => 0)
+      _ <- crawl(Set(test.Home), test.TestRouter, test.Processor)
+    } yield ())
+      .provide(test.TestWeb)
+      .fold(_ => 1, _ => 0)
+
 }
 
 object circuit_breaker extends App {
